@@ -1,4 +1,9 @@
 #!/usr/bin/env python
+"""
+This file uses Theano dense layers for estimating Q values, but uses pre-trained Keras features before the dense layers.
+"""
+
+
 # -*- coding: utf-8 -*-
 from __future__ import division
 from __future__ import print_function
