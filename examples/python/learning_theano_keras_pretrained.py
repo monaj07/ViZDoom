@@ -9,11 +9,16 @@ from time import time, sleep
 import numpy as np
 import skimage.color, skimage.transform
 from tqdm import trange
+import pickle
 
 from keras.layers import Input, Dense, Convolution2D, Activation, Flatten
 from keras.models import Model
 from keras.optimizers import SGD
-import cv2
+import theano.tensor as T
+import theano
+import layers
+from lasagne.objectives import squared_error
+from lasagne.updates import rmsprop
 
 # Q-learning settings
 learning_rate = 0.00025
@@ -76,15 +81,53 @@ class ReplayMemory:
 
 
 def create_network(available_actions_count):
-    input_state = Input(shape=(4096,))
-    dense = Dense(output_dim=128, init='glorot_normal')(input_state)
-    dense = Activation('relu')(dense)
-    output = Dense(output_dim=available_actions_count, init='glorot_normal')(dense)
+    s1 = T.matrix("State")
+    a = T.vector("Action", dtype="int32")
+    q2 = T.vector("Q2")
+    r = T.vector("Reward")
+    isterminal = T.vector("IsTerminal", dtype="int8")
 
-    model = Model(input=input_state, output=output)
-    sgd = SGD(lr=0.00025, momentum=0.9, decay=0.005, nesterov=True)
-    model.compile(optimizer=sgd, loss='mse')
-    return model
+    input_state = s1  #Input(shape=(4096,))
+
+    # Add a single fully-connected layer.
+    dense_1 = layers.FCLayer(input=input_state, fan_in=4096, num_hidden=128)
+    # Add the output layer. (no nonlinearity as it is for approximating an arbitrary real function)
+    dense_2 = layers.FCLayer(input=dense_1.out, fan_in=128, num_hidden=available_actions_count, activation=None)
+    q = dense_2.out
+
+    # target_Q(s,a) = r + gamma * max Q(s2,_) if isterminal else r
+    target_q = T.set_subtensor(q[T.arange(q.shape[0]), a], r + discount_factor * (1 - isterminal) * q2)
+    loss = squared_error(q, target_q).mean()
+
+    # Update the parameters according to the computed gradient using RMSProp.
+    params = dense_1.params + dense_2.params
+    updates = rmsprop(loss, params, learning_rate)
+
+    # Compile the theano functions
+    print("Compiling the network ...")
+    function_learn = theano.function([s1, q2, a, r, isterminal], loss, updates=updates, name="learn_fn", allow_input_downcast=True)
+    function_get_q_values = theano.function([s1], q, name="eval_fn", allow_input_downcast=True)
+    function_get_best_action = theano.function([s1], T.argmax(q), name="test_fn", allow_input_downcast=True)
+    print("Network compiled.")
+
+    def simple_get_best_action(state):
+        return function_get_best_action(state)
+
+    # Returns Theano objects for the net and functions.
+    return params, function_learn, function_get_q_values, simple_get_best_action
+
+
+def learn_from_memory():
+    """ Learns from a single transition (making use of replay memory).
+    s2 is ignored if s2_isterminal """
+
+    # Get a random minibatch from the replay memory and learns from it.
+    if memory.size > batch_size:
+        s1, a, s2, isterminal, r = memory.get_sample(batch_size)
+        q2 = get_q_values(s2)
+        maxq2 = np.max(q2, axis=1)
+        # the value of q2 is ignored in learn if s2 is terminal
+        learn(s1, maxq2, a, r, isterminal)
 
 
 def get_pre_trained_features(im):
@@ -104,7 +147,7 @@ CNN_model = vggModel('/home/monaj/Documents/myKeras/LRCN/vgg16_weights.h5')
 get_penaltimate_features = K.function([CNN_model.layers[0].input, K.learning_phase()], [CNN_model.layers[-2].output])
 
 
-def perform_learning_step(epoch, loss):
+def perform_learning_step(epoch):
     """ Makes an action according to eps-greedy policy, observes the result
     (next state, reward) and learns from the transition"""
 
@@ -133,8 +176,7 @@ def perform_learning_step(epoch, loss):
         a = randint(0, len(actions) - 1)
     else:
         # Choose the best action according to the network.
-        q = model.predict(s1)
-        a = np.argmax(q)
+        a = get_best_action(s1)
     reward = game.make_action(actions[a], frame_repeat)
 
     isterminal = game.is_episode_finished()
@@ -142,16 +184,8 @@ def perform_learning_step(epoch, loss):
 
     # Remember the transition that was just experienced.
     memory.add_transition(s1, a, s2, isterminal, reward)
-    # Get a random minibatch from the replay memory and learns from it.
-    if memory.size > batch_size:
-        s1, a, s2, isterminal, r = memory.get_sample(batch_size)
-        q1 = model.predict(s1)
-        q2 = model.predict(s2)
-        isterminal = isterminal.astype(float)
-        targets = q1
-        targets[range(batch_size), a] = r + (1. - isterminal) * discount_factor * np.max(q2, axis=1)
-        loss += model.train_on_batch(s1, targets)
-    return loss
+
+    learn_from_memory()
 
 
 # Creates and initializes ViZDoom environment.
@@ -168,6 +202,20 @@ def initialize_vizdoom(config_file_path):
     return game
 
 
+def set_all_param_values_special(params, values, **tags):
+    if len(params) != len(values):
+        raise ValueError("mismatch: got %d values to set %d parameters" %
+                         (len(values), len(params)))
+
+    for p, v in zip(params, values):
+        if p.get_value().shape != v.shape:
+            raise ValueError("mismatch: parameter has shape %r but value to "
+                             "set has shape %r" %
+                             (p.get_value().shape, v.shape))
+        else:
+            p.set_value(v)
+
+
 # Create Doom instance
 game = initialize_vizdoom(config_file_path)
 # Action = which buttons are pressed
@@ -176,9 +224,10 @@ actions = [list(a) for a in it.product([0, 1], repeat=n)]
 # Create replay memory which will store the transitions
 memory = ReplayMemory(capacity=replay_memory_size)
 
-model = create_network(len(actions))
+params, learn, get_q_values, get_best_action = create_network(len(actions))
 
 print("Starting the training!")
+
 time_start = time()
 for epoch in range(epochs):
     print("\nEpoch %d\n-------" % (epoch + 1))
@@ -186,10 +235,9 @@ for epoch in range(epochs):
     train_scores = []
 
     print("Training...")
-    loss = 0
     game.new_episode()
     for learning_step in trange(learning_steps_per_epoch):
-        loss = perform_learning_step(epoch, loss)
+        perform_learning_step(epoch)
         if game.is_episode_finished():
             score = game.get_total_reward()
             train_scores.append(score)
@@ -197,9 +245,11 @@ for epoch in range(epochs):
             train_episodes_finished += 1
 
     print("%d training episodes played." % train_episodes_finished)
+
     train_scores = np.array(train_scores)
-    print("Results: mean: %.1f±%.1f," % (train_scores.mean(), train_scores.std()),
-          "min: %.1f," % train_scores.min(), "max: %.1f," % train_scores.max(), "loss: %f," % loss)
+
+    print("Results: mean: %.1f±%.1f," % (train_scores.mean(), train_scores.std()), \
+          "min: %.1f," % train_scores.min(), "max: %.1f," % train_scores.max())
 
     print("\nTesting...")
     test_episode = []
@@ -209,7 +259,7 @@ for epoch in range(epochs):
         while not game.is_episode_finished():
             state = preprocess(game.get_state().screen_buffer)
             state = get_pre_trained_features(state)
-            best_action_index = np.argmax(model.predict(state))
+            best_action_index = get_best_action(state)
 
             game.make_action(actions[best_action_index], frame_repeat)
         r = game.get_total_reward()
@@ -220,16 +270,20 @@ for epoch in range(epochs):
         test_scores.mean(), test_scores.std()), "min: %.1f" % test_scores.min(), "max: %.1f" % test_scores.max())
 
     print("Saving the network weigths to:", model_savefile)
-    model.save_weights(model_savefile, overwrite=True)
+    pickle.dump([p.get_value() for p in params], open(model_savefile, "wb"))
+
     print("Total elapsed time: %.2f minutes" % ((time() - time_start) / 60.0))
 
 game.close()
 print("======================================")
+print("Loading the network weigths from:", model_savefile)
 print("Training finished. It's time to watch!")
 
-print("Loading the network weigths from:", model_savefile)
+
 # Load the network's parameters from a file
-model.load_weights(model_savefile)
+
+params_values = pickle.load(open(model_savefile, "rb"))
+set_all_param_values_special(params, params_values)
 
 # Reinitialize the game with window visible
 game.set_window_visible(True)
@@ -241,7 +295,7 @@ for _ in range(episodes_to_watch):
     while not game.is_episode_finished():
         state = preprocess(game.get_state().screen_buffer)
         state = get_pre_trained_features(state)
-        best_action_index = np.argmax(model.predict(state))
+        best_action_index = get_best_action(state)
 
         # Instead of make_action(a, frame_repeat) in order to make the animation smooth
         game.set_action(actions[best_action_index])

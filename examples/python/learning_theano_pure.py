@@ -97,17 +97,17 @@ def create_network(available_actions_count):
 
     # Add 2 convolutional layers with ReLu activation
     # filter_shape = [num_filters, num_input_feature_maps, filter_height, filter_width]
-    layer1 = layers.ConvLayer(input=inputLayer, filter_shape=[8, 1, 6, 6], pool_size=None)
-    layer2 = layers.ConvLayer(input=layer1.out, filter_shape=[8, 8, 3, 3], pool_size=None)
+    layer1 = layers.ConvLayer(input=inputLayer, filter_shape=[8, 1, 6, 6], fan_in=1*6*6, pool_size=None)
+    layer2 = layers.ConvLayer(input=layer1.out, filter_shape=[8, 8, 3, 3], fan_in=8*3*3, pool_size=None)
 
     # Add a single fully-connected layer.
-    layer3 = layers.FCLayer(input=layer2.out.flatten(2), num_hidden=128)
-
+    layer3 = layers.FCLayer(input=layer2.out.flatten(2), fan_in=64*3*3, num_hidden=128)
+    # 64 = num_output_feature_maps in the second layer =  num_output_feature_maps in the first layer (8) * num_filters in the second_layer (8)
     # Add the output layer (also fully-connected).
     # (no nonlinearity as it is for approximating an arbitrary real function)
-    layer3 = layers.FCLayer(input=layer3.out, num_hidden=available_actions_count, activation=None)
+    layer4 = layers.FCLayer(input=layer3.out, fan_in=128, num_hidden=available_actions_count, activation=None)
 
-    q = layer3.out
+    q = layer4.out
 
     # target differs from q only for the selected action. The following means:
     # target_Q(s,a) = r + gamma * max Q(s2,_) if isterminal else r
@@ -115,7 +115,7 @@ def create_network(available_actions_count):
     loss = squared_error(q, target_q).mean()
 
     # Update the parameters according to the computed gradient using RMSProp.
-    params = layer3.params + layer2.params + layer1.params
+    params = layer4.params + layer3.params + layer2.params + layer1.params
     updates = rmsprop(loss, params, learning_rate)
 
     # Compile the theano functions
