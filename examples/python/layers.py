@@ -11,14 +11,15 @@ RELU = lambda x: x * (x > 1e-6)
 
 
 class ConvLayer(object):
-    def __init__(self, input, filter_shape, fan_in, pool_size=(2, 2), activation=RELU):
+    def __init__(self, input, filter_shape, input_shape, pool_size=(2, 2), activation=RELU):
         # filterShape: [num_filters, num_input_feature_maps, filt_height, filt_width]
         # input_shape: [minibatch_size, num_input_feature_maps, img_height, img_width]
-        input_shape = T.shape(input)
-        input = theano.printing.Print('input')(input)
-        # The number of feature maps of the input and the input dimension of the filters must be equal:
-        assert input_shape[1] == filter_shape[1]
 
+        #input = theano.printing.Print('input')(input)
+        # The number of feature maps of the input and the input dimension of the filters must be equal:
+        #assert input_shape[1] == filter_shape[1]
+
+        fan_in = np.prod(filter_shape[1:])
         # each unit in the lower layer receives a gradient from:
         # "num output feature maps * filter height * filter width" / pooling size
         if pool_size is not None:
@@ -31,8 +32,7 @@ class ConvLayer(object):
         b_values = np.zeros(filter_shape[0], dtype=theano.config.floatX)
         self.b = theano.shared(value=b_values, borrow=True)
 
-        conv_out = conv2d(input=input, filters=self.w, filter_shape=filter_shape, input_shape=input_shape,
-                          border_mode="full")
+        conv_out = conv2d(input=input, filters=self.w, filter_shape=filter_shape, input_shape=input_shape)
         if pool_size is not None:
             pooling_out = T.signal.pool.pool_2d(input=input, ds=pool_size, ignore_border=True)
         else:

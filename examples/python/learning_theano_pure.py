@@ -21,11 +21,13 @@ from tqdm import trange
 import layers
 import theano.tensor as T
 
+import theano.printing
+
 # Q-learning settings
 learning_rate = 0.00025
 # learning_rate = 0.0001
 discount_factor = 0.99
-epochs = 5
+epochs = 20
 learning_steps_per_epoch = 2000
 replay_memory_size = 10000
 
@@ -94,20 +96,29 @@ def create_network(available_actions_count):
 
     # Create the input layer of the network.
     inputLayer = s1
-
+    new_w = resolution[0]
+    new_h = resolution[1]
     # Add 2 convolutional layers with ReLu activation
     # filter_shape = [num_filters, num_input_feature_maps, filter_height, filter_width]
-    layer1 = layers.ConvLayer(input=inputLayer, filter_shape=[8, 1, 6, 6], fan_in=1*6*6, pool_size=None)
-    layer2 = layers.ConvLayer(input=layer1.out, filter_shape=[8, 8, 3, 3], fan_in=8*3*3, pool_size=None)
-
+    input_shape_1 = [batch_size, 1, resolution[0], resolution[1]]
+    filter_shape_1 = [8, 1, 6, 6]
+    layer1 = layers.ConvLayer(input=inputLayer, filter_shape=filter_shape_1, input_shape=input_shape_1, pool_size=None)
+    new_w = (new_w - filter_shape_1[2] + 1)/1  # No pooling
+    new_h = (new_h - filter_shape_1[3] + 1)/1  # No pooling
+    input_shape_2 = [batch_size, 8, new_w, new_h]
+    filter_shape_2 = [8, 8, 3, 3]
+    layer2 = layers.ConvLayer(input=layer1.out, filter_shape=filter_shape_2, input_shape=input_shape_2, pool_size=None)
     # Add a single fully-connected layer.
-    layer3 = layers.FCLayer(input=layer2.out.flatten(2), fan_in=64*3*3, num_hidden=128)
-    # 64 = num_output_feature_maps in the second layer =  num_output_feature_maps in the first layer (8) * num_filters in the second_layer (8)
+    new_w = (new_w - filter_shape_2[2] + 1)/1  # No pooling
+    new_h = (new_h - filter_shape_2[3] + 1)/1  # No pooling
+    layer3 = layers.FCLayer(input=layer2.out.flatten(2), fan_in=filter_shape_2[0]*new_w*new_h, num_hidden=128)
+
     # Add the output layer (also fully-connected).
     # (no nonlinearity as it is for approximating an arbitrary real function)
     layer4 = layers.FCLayer(input=layer3.out, fan_in=128, num_hidden=available_actions_count, activation=None)
+    layer4_out = layer4.out
 
-    q = layer4.out
+    q = layer4_out
 
     # target differs from q only for the selected action. The following means:
     # target_Q(s,a) = r + gamma * max Q(s2,_) if isterminal else r
@@ -122,11 +133,14 @@ def create_network(available_actions_count):
     print("Compiling the network ...")
     function_learn = theano.function([s1, q2, a, r, isterminal], loss, updates=updates, name="learn_fn")
     function_get_q_values = theano.function([s1], q, name="eval_fn")
-    function_get_best_action = theano.function([s1], tensor.argmax(q), name="test_fn")
+    function_get_best_action = theano.function([s1], T.argmax(q, axis=1), name="test_fn")
     print("Network compiled.")
 
     def simple_get_best_action(state):
-        return function_get_best_action(state.reshape([1, 1, resolution[0], resolution[1]]))
+        state = np.expand_dims(state, axis=0)
+        state = np.expand_dims(state, axis=0)
+        state = np.repeat(state, batch_size, axis=0)
+        return function_get_best_action(state)
 
     # Returns Theano objects for the net and functions.
     return params, function_learn, function_get_q_values, simple_get_best_action
@@ -173,7 +187,7 @@ def perform_learning_step(epoch):
         a = randint(0, len(actions) - 1)
     else:
         # Choose the best action according to the network.
-        a = get_best_action(s1)
+        a = get_best_action(s1)[0]
     reward = game.make_action(actions[a], frame_repeat)
 
     isterminal = game.is_episode_finished()
@@ -254,7 +268,7 @@ for epoch in range(epochs):
         game.new_episode()
         while not game.is_episode_finished():
             state = preprocess(game.get_state().screen_buffer)
-            best_action_index = get_best_action(state)
+            best_action_index = get_best_action(state)[0]
 
             game.make_action(actions[best_action_index], frame_repeat)
         r = game.get_total_reward()
@@ -291,7 +305,7 @@ for _ in range(episodes_to_watch):
     game.new_episode()
     while not game.is_episode_finished():
         state = preprocess(game.get_state().screen_buffer)
-        best_action_index = get_best_action(state)
+        best_action_index = get_best_action(state)[0]
 
         # Instead of make_action(a, frame_repeat) in order to make the animation smooth
         game.set_action(actions[best_action_index])
